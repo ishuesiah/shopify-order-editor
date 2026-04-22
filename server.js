@@ -185,13 +185,17 @@ app.post('/api/order/details', async (req, res) => {
   }
 });
 
-// Edit order - update customizations
+// Edit order - update customizations by swapping charm/pocket line items
 app.post('/api/order/edit', async (req, res) => {
   try {
     const { orderId, customerEmail, lineItemEdits } = req.body;
 
     if (!orderId || !customerEmail) {
       return res.status(400).json({ error: 'Missing orderId or customerEmail' });
+    }
+
+    if (!lineItemEdits || lineItemEdits.length === 0) {
+      return res.status(400).json({ error: 'No changes provided' });
     }
 
     // Verify ownership
@@ -202,12 +206,56 @@ app.post('/api/order/edit', async (req, res) => {
 
     const gidOrderId = `gid://shopify/Order/${orderId}`;
 
+    // Get order details to find existing line items
+    const orderQuery = `
+      query getOrder($id: ID!) {
+        order(id: $id) {
+          id
+          lineItems(first: 50) {
+            edges {
+              node {
+                id
+                title
+                quantity
+                variant {
+                  id
+                }
+                customAttributes {
+                  key
+                  value
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const orderResult = await shopifyAdminAPI(orderQuery, { id: gidOrderId });
+    const lineItems = orderResult.data?.order?.lineItems?.edges || [];
+
     // Step 1: Begin order edit
     const beginEditQuery = `
       mutation orderEditBegin($id: ID!) {
         orderEditBegin(id: $id) {
           calculatedOrder {
             id
+            lineItems(first: 50) {
+              edges {
+                node {
+                  id
+                  title
+                  quantity
+                  variant {
+                    id
+                  }
+                  customAttributes {
+                    key
+                    value
+                  }
+                }
+              }
+            }
           }
           userErrors {
             field
@@ -223,13 +271,112 @@ app.post('/api/order/edit', async (req, res) => {
       throw new Error(beginResult.data.orderEditBegin.userErrors[0].message);
     }
 
-    const calculatedOrderId = beginResult.data.orderEditBegin.calculatedOrder.id;
+    const calculatedOrder = beginResult.data.orderEditBegin.calculatedOrder;
+    const calculatedOrderId = calculatedOrder.id;
+    const calculatedLineItems = calculatedOrder.lineItems?.edges || [];
 
-    // Step 2: Apply line item edits (for now, we'll add a note about the changes)
-    // Note: Shopify's Order Edit API doesn't directly support changing line item properties
-    // We'll add the changes as order notes/attributes
+    let madeChanges = false;
 
-    // Step 3: Commit the edit
+    // Process each edit
+    for (const edit of lineItemEdits) {
+      const parentLineItemId = edit.lineItemId;
+
+      // Find parent line item to get its variant ID for linking
+      const parentItem = lineItems.find(li => li.node.id.includes(parentLineItemId));
+      const parentVariantId = parentItem?.node?.variant?.id;
+
+      for (const [customType, newValue] of Object.entries(edit.customizations)) {
+        if (newValue === 'None' || !newValue) continue;
+
+        // Search for the new product by title
+        const searchResults = await searchProduct(newValue);
+        if (searchResults.length === 0) continue;
+
+        const newProduct = searchResults[0].node;
+        const newVariantId = newProduct.variants.edges[0]?.node?.id;
+
+        if (!newVariantId) continue;
+
+        // Find existing accessory line item of this type linked to the parent
+        const existingAccessory = calculatedLineItems.find(li => {
+          const attrs = li.node.customAttributes || [];
+          const isLinked = attrs.some(a =>
+            a.key === '_duo_parent_variant' &&
+            parentVariantId &&
+            a.value === parentVariantId.split('/').pop()
+          );
+          const titleLower = li.node.title.toLowerCase();
+
+          if (customType.includes('Charm') || customType.includes('charm')) {
+            return isLinked && titleLower.includes('charm');
+          } else if (customType.includes('front') || customType.includes('Front')) {
+            return isLinked && titleLower.includes('pocket') && titleLower.includes('front');
+          } else if (customType.includes('back') || customType.includes('Back')) {
+            return isLinked && titleLower.includes('pocket') && titleLower.includes('back');
+          }
+          return false;
+        });
+
+        // Remove old accessory if exists
+        if (existingAccessory) {
+          const removeQuery = `
+            mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+              orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+                calculatedOrder {
+                  id
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `;
+
+          await shopifyAdminAPI(removeQuery, {
+            id: calculatedOrderId,
+            lineItemId: existingAccessory.node.id,
+            quantity: 0
+          });
+          madeChanges = true;
+        }
+
+        // Add new accessory
+        const addQuery = `
+          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+            orderEditAddVariant(id: $id, variantId: $variantId, quantity: 1) {
+              calculatedOrder {
+                id
+              }
+              calculatedLineItem {
+                id
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
+
+        await shopifyAdminAPI(addQuery, {
+          id: calculatedOrderId,
+          variantId: newVariantId,
+          quantity: 1
+        });
+        madeChanges = true;
+      }
+    }
+
+    if (!madeChanges) {
+      // No actual changes were made, cancel the edit
+      return res.json({
+        success: true,
+        message: 'No changes needed'
+      });
+    }
+
+    // Commit the edit
     const commitQuery = `
       mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean) {
         orderEditCommit(id: $id, notifyCustomer: $notifyCustomer) {
@@ -252,35 +399,6 @@ app.post('/api/order/edit', async (req, res) => {
 
     if (commitResult.data.orderEditCommit.userErrors?.length > 0) {
       throw new Error(commitResult.data.orderEditCommit.userErrors[0].message);
-    }
-
-    // Add order note with customization changes
-    if (lineItemEdits && lineItemEdits.length > 0) {
-      const noteQuery = `
-        mutation orderUpdate($input: OrderInput!) {
-          orderUpdate(input: $input) {
-            order {
-              id
-              note
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
-      const changesSummary = lineItemEdits
-        .map(edit => `${edit.productTitle}: ${Object.entries(edit.customizations).map(([k, v]) => `${k}=${v}`).join(', ')}`)
-        .join('\n');
-
-      await shopifyAdminAPI(noteQuery, {
-        input: {
-          id: gidOrderId,
-          note: `Customer requested customization changes:\n${changesSummary}\n\n(Updated: ${new Date().toISOString()})`
-        }
-      });
     }
 
     res.json({
