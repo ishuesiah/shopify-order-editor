@@ -344,7 +344,7 @@ app.post('/api/order/edit', async (req, res) => {
         // Add new accessory
         const addQuery = `
           mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
-            orderEditAddVariant(id: $id, variantId: $variantId, quantity: 1) {
+            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
               calculatedOrder {
                 id
               }
