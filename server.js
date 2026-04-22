@@ -285,16 +285,15 @@ app.post('/api/order/edit', async (req, res) => {
       const parentItem = lineItems.find(li => li.node.id.includes(parentLineItemId));
       const parentVariantId = parentItem?.node?.variant?.id;
 
-      for (const [customType, newValue] of Object.entries(edit.customizations)) {
+      // customizations is now an array of {type, title, variantId}
+      const customizations = Array.isArray(edit.customizations) ? edit.customizations : [];
+
+      for (const custom of customizations) {
+        const customType = custom.type;
+        const newValue = custom.title;
+        const newVariantId = custom.variantId ? `gid://shopify/ProductVariant/${custom.variantId}` : null;
+
         if (newValue === 'None' || !newValue) continue;
-
-        // Search for the new product by title
-        const searchResults = await searchProduct(newValue);
-        if (searchResults.length === 0) continue;
-
-        const newProduct = searchResults[0].node;
-        const newVariantId = newProduct.variants.edges[0]?.node?.id;
-
         if (!newVariantId) continue;
 
         // Find existing accessory line item of this type linked to the parent
