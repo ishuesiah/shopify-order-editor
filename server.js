@@ -16,7 +16,7 @@ app.use(cors({
 }));
 
 // Shopify API configuration
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // e.g., 'hemlock-oak'
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const API_VERSION = '2024-01';
 
@@ -70,29 +70,6 @@ async function verifyOrderOwnership(orderId, customerEmail) {
   return orderEmail?.toLowerCase() === customerEmail?.toLowerCase();
 }
 
-// Get product variant by ID
-async function getVariantById(variantId) {
-  const query = `
-    query getVariant($id: ID!) {
-      productVariant(id: $id) {
-        id
-        title
-        price
-        product {
-          id
-          title
-        }
-      }
-    }
-  `;
-
-  const result = await shopifyAdminAPI(query, {
-    id: `gid://shopify/ProductVariant/${variantId}`
-  });
-
-  return result.data?.productVariant;
-}
-
 // Search for product by title
 async function searchProduct(title) {
   const query = `
@@ -121,6 +98,27 @@ async function searchProduct(title) {
   return result.data?.products?.edges || [];
 }
 
+// Get existing customization metafield
+async function getCustomizationMetafield(orderId) {
+  const query = `
+    query getOrderMetafield($id: ID!) {
+      order(id: $id) {
+        metafield(namespace: "custom", key: "customization_overrides") {
+          value
+        }
+      }
+    }
+  `;
+
+  try {
+    const result = await shopifyAdminAPI(query, { id: orderId });
+    const value = result.data?.order?.metafield?.value;
+    return value ? JSON.parse(value) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
 // ============================================
 // API ENDPOINTS
 // ============================================
@@ -139,7 +137,6 @@ app.post('/api/order/details', async (req, res) => {
       return res.status(400).json({ error: 'Missing orderId or customerEmail' });
     }
 
-    // Verify ownership
     const isOwner = await verifyOrderOwnership(orderId, customerEmail);
     if (!isOwner) {
       return res.status(403).json({ error: 'Unauthorized: You do not own this order' });
@@ -185,7 +182,7 @@ app.post('/api/order/details', async (req, res) => {
   }
 });
 
-// Edit order - update customizations by swapping charm/pocket line items
+// Edit order - update customizations
 app.post('/api/order/edit', async (req, res) => {
   try {
     const { orderId, customerEmail, lineItemEdits } = req.body;
@@ -206,12 +203,16 @@ app.post('/api/order/edit', async (req, res) => {
 
     const gidOrderId = `gid://shopify/Order/${orderId}`;
 
-    // Get order details to find existing line items
+    // Get existing metafield data (tracks what we previously added)
+    const existingMetafield = await getCustomizationMetafield(gidOrderId);
+    console.log('Existing metafield:', JSON.stringify(existingMetafield, null, 2));
+
+    // Get order details with all line items
     const orderQuery = `
       query getOrder($id: ID!) {
         order(id: $id) {
           id
-          lineItems(first: 50) {
+          lineItems(first: 100) {
             edges {
               node {
                 id
@@ -232,15 +233,15 @@ app.post('/api/order/edit', async (req, res) => {
     `;
 
     const orderResult = await shopifyAdminAPI(orderQuery, { id: gidOrderId });
-    const lineItems = orderResult.data?.order?.lineItems?.edges || [];
+    const allLineItems = orderResult.data?.order?.lineItems?.edges || [];
 
-    // Step 1: Begin order edit
+    // Begin order edit
     const beginEditQuery = `
       mutation orderEditBegin($id: ID!) {
         orderEditBegin(id: $id) {
           calculatedOrder {
             id
-            lineItems(first: 50) {
+            lineItems(first: 100) {
               edges {
                 node {
                   id
@@ -275,135 +276,170 @@ app.post('/api/order/edit', async (req, res) => {
     const calculatedOrderId = calculatedOrder.id;
     const calculatedLineItems = calculatedOrder.lineItems?.edges || [];
 
+    console.log('Calculated line items:', calculatedLineItems.map(li => ({
+      id: li.node.id,
+      title: li.node.title,
+      variantId: li.node.variant?.id,
+      qty: li.node.quantity
+    })));
+
     let madeChanges = false;
-    const removedLineItemIds = new Set(); // Track which items we've already removed
+    const removedLineItemIds = new Set();
+    const newMetafieldData = { ...existingMetafield };
 
-    // Process each edit
-    console.log('Processing lineItemEdits:', JSON.stringify(lineItemEdits, null, 2));
-
+    // Process each parent item edit
     for (const edit of lineItemEdits) {
       const parentLineItemId = edit.lineItemId;
-      console.log('Processing edit for lineItemId:', parentLineItemId);
+      console.log('\n=== Processing parent:', parentLineItemId, '===');
 
-      // Find parent line item to get its variant ID for linking
-      const parentItem = lineItems.find(li => li.node.id.includes(parentLineItemId));
+      // Find parent line item to get its variant ID
+      const parentItem = allLineItems.find(li => li.node.id.includes(parentLineItemId));
       const parentVariantId = parentItem?.node?.variant?.id;
+      const parentVariantIdShort = parentVariantId?.split('/').pop();
       console.log('Parent variant ID:', parentVariantId);
 
-      // customizations is now an array of {type, title, variantId}
+      if (!parentVariantId) {
+        console.log('Could not find parent variant ID, skipping');
+        continue;
+      }
+
+      // Initialize metafield entry for this parent
+      if (!newMetafieldData[parentLineItemId]) {
+        newMetafieldData[parentLineItemId] = {};
+      }
+
       const customizations = Array.isArray(edit.customizations) ? edit.customizations : [];
-      console.log('Customizations to process:', customizations.length, customizations);
+      console.log('Customizations to process:', customizations);
 
-      // Find ALL charms linked to this parent (for proper first/second charm handling)
-      const linkedCharms = calculatedLineItems.filter(li => {
+      // Step 1: Find ALL accessories to remove for this parent
+      // This includes:
+      // - Original accessories (linked via _duo_parent_variant)
+      // - Previously added accessories (tracked via metafield variantIds)
+
+      const accessoriesToRemove = [];
+
+      // Find original accessories linked via _duo_parent_variant
+      for (const li of calculatedLineItems) {
+        if (removedLineItemIds.has(li.node.id)) continue;
+        if (li.node.quantity <= 0) continue;
+
         const attrs = li.node.customAttributes || [];
-        const isLinked = attrs.some(a =>
-          a.key === '_duo_parent_variant' &&
-          parentVariantId &&
-          a.value === parentVariantId.split('/').pop()
-        );
-        const titleLower = li.node.title.toLowerCase();
-        return isLinked && titleLower.includes('charm') && !removedLineItemIds.has(li.node.id);
-      });
+        const linkedTo = attrs.find(a => a.key === '_duo_parent_variant')?.value;
 
-      let charmIndex = 0; // Track which charm we're on for this parent
+        if (linkedTo === parentVariantIdShort) {
+          const titleLower = li.node.title.toLowerCase();
+          if (titleLower.includes('charm') || titleLower.includes('pocket')) {
+            console.log('Found original accessory to remove:', li.node.title, li.node.id);
+            accessoriesToRemove.push(li.node);
+          }
+        }
+      }
 
+      // Find previously added accessories (from metafield) by variant ID
+      const prevData = existingMetafield[parentLineItemId] || {};
+      for (const [customType, customData] of Object.entries(prevData)) {
+        if (customData && customData.variantId) {
+          const prevVariantGid = `gid://shopify/ProductVariant/${customData.variantId}`;
+          // Find line item with this variant that hasn't been marked for removal
+          for (const li of calculatedLineItems) {
+            if (removedLineItemIds.has(li.node.id)) continue;
+            if (li.node.quantity <= 0) continue;
+            if (li.node.variant?.id === prevVariantGid) {
+              // Check it's not already in our remove list
+              if (!accessoriesToRemove.find(a => a.id === li.node.id)) {
+                console.log('Found previously added accessory to remove:', li.node.title, li.node.id, 'type:', customType);
+                accessoriesToRemove.push(li.node);
+                break; // Only remove one per type
+              }
+            }
+          }
+        }
+      }
+
+      // Step 2: Remove all found accessories
+      for (const accessory of accessoriesToRemove) {
+        if (removedLineItemIds.has(accessory.id)) continue;
+        removedLineItemIds.add(accessory.id);
+
+        console.log('Removing:', accessory.title, accessory.id);
+        const removeQuery = `
+          mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+            orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+              calculatedOrder { id }
+              userErrors { field message }
+            }
+          }
+        `;
+
+        const removeResult = await shopifyAdminAPI(removeQuery, {
+          id: calculatedOrderId,
+          lineItemId: accessory.id,
+          quantity: 0
+        });
+
+        if (removeResult.data?.orderEditSetQuantity?.userErrors?.length > 0) {
+          console.error('Remove error:', removeResult.data.orderEditSetQuantity.userErrors);
+        }
+        madeChanges = true;
+      }
+
+      // Step 3: Add new accessories based on selections
       for (const custom of customizations) {
         const customType = custom.type;
         const newValue = custom.title;
-        const newVariantId = custom.variantId ? `gid://shopify/ProductVariant/${custom.variantId}` : null;
+        const newVariantId = custom.variantId;
 
-        if (newValue === 'None' || !newValue) continue;
-        if (!newVariantId) continue;
+        console.log('Processing customization:', customType, '=', newValue, 'variantId:', newVariantId);
 
-        let existingAccessory = null;
-
-        if (customType.includes('Charm') || customType.includes('charm')) {
-          // Use the next available linked charm for this parent
-          if (charmIndex < linkedCharms.length) {
-            existingAccessory = linkedCharms[charmIndex];
-            charmIndex++;
-          }
-        } else {
-          // For pockets, find by type (front/back)
-          existingAccessory = calculatedLineItems.find(li => {
-            if (removedLineItemIds.has(li.node.id)) return false;
-            const attrs = li.node.customAttributes || [];
-            const isLinked = attrs.some(a =>
-              a.key === '_duo_parent_variant' &&
-              parentVariantId &&
-              a.value === parentVariantId.split('/').pop()
-            );
-            const titleLower = li.node.title.toLowerCase();
-
-            if (customType.includes('front') || customType.includes('Front')) {
-              return isLinked && titleLower.includes('pocket') && titleLower.includes('front');
-            } else if (customType.includes('back') || customType.includes('Back')) {
-              return isLinked && titleLower.includes('pocket') && titleLower.includes('back');
-            }
-            return false;
-          });
+        // Update metafield entry
+        if (newValue === 'None' || !newValue) {
+          newMetafieldData[parentLineItemId][customType] = { title: 'None', variantId: null };
+          continue;
         }
 
-        // Remove old accessory if exists
-        if (existingAccessory) {
-          removedLineItemIds.add(existingAccessory.node.id);
-          const removeQuery = `
-            mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
-              orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
-                calculatedOrder {
-                  id
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }
-          `;
-
-          await shopifyAdminAPI(removeQuery, {
-            id: calculatedOrderId,
-            lineItemId: existingAccessory.node.id,
-            quantity: 0
-          });
-          madeChanges = true;
+        if (!newVariantId) {
+          console.log('No variant ID for', newValue, ', skipping add');
+          newMetafieldData[parentLineItemId][customType] = { title: newValue, variantId: null };
+          continue;
         }
 
-        // Add new accessory
-        console.log('Adding accessory:', customType, newValue, 'variantId:', newVariantId);
+        // Add the new accessory
+        const gidVariantId = `gid://shopify/ProductVariant/${newVariantId}`;
+        console.log('Adding:', newValue, gidVariantId);
+
         const addQuery = `
           mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
             orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
-              calculatedOrder {
-                id
-              }
-              calculatedLineItem {
-                id
-              }
-              userErrors {
-                field
-                message
-              }
+              calculatedOrder { id }
+              calculatedLineItem { id }
+              userErrors { field message }
             }
           }
         `;
 
         const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
-          variantId: newVariantId,
+          variantId: gidVariantId,
           quantity: 1
         });
-        console.log('Add result:', JSON.stringify(addResult, null, 2));
+
         if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
           console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
+        } else {
+          console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
         }
+
+        // Store in metafield with variant ID for future removal
+        newMetafieldData[parentLineItemId][customType] = {
+          title: newValue,
+          variantId: newVariantId
+        };
+
         madeChanges = true;
       }
     }
 
     if (!madeChanges) {
-      // No actual changes were made, cancel the edit
       return res.json({
         success: true,
         message: 'No changes needed'
@@ -435,54 +471,15 @@ app.post('/api/order/edit', async (req, res) => {
       throw new Error(commitResult.data.orderEditCommit.userErrors[0].message);
     }
 
-    // Save customization changes to order metafield for display purposes
-    // First, fetch existing metafield data to merge with new changes
-    const getMetafieldQuery = `
-      query getOrderMetafield($id: ID!) {
-        order(id: $id) {
-          metafield(namespace: "custom", key: "customization_overrides") {
-            value
-          }
-        }
-      }
-    `;
+    console.log('Order edit committed successfully');
+    console.log('Saving metafield:', JSON.stringify(newMetafieldData, null, 2));
 
-    let existingData = {};
-    try {
-      const metafieldResult = await shopifyAdminAPI(getMetafieldQuery, { id: gidOrderId });
-      const existingValue = metafieldResult.data?.order?.metafield?.value;
-      if (existingValue) {
-        existingData = JSON.parse(existingValue);
-      }
-    } catch (e) {
-      console.log('No existing metafield or parse error, starting fresh');
-    }
-
-    // Merge new changes into existing data
-    console.log('Existing metafield data:', existingData);
-    for (const edit of lineItemEdits) {
-      const lineItemId = edit.lineItemId;
-      console.log('Merging for lineItemId:', lineItemId);
-      if (!existingData[lineItemId]) {
-        existingData[lineItemId] = {};
-      }
-      for (const custom of (Array.isArray(edit.customizations) ? edit.customizations : [])) {
-        console.log('Setting', custom.type, '=', custom.title);
-        existingData[lineItemId][custom.type] = custom.title;
-      }
-    }
-    console.log('Final metafield data to save:', JSON.stringify(existingData, null, 2));
-
+    // Save metafield with all customization data
     const metafieldQuery = `
       mutation orderUpdate($input: OrderInput!) {
         orderUpdate(input: $input) {
-          order {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
+          order { id }
+          userErrors { field message }
         }
       }
     `;
@@ -493,7 +490,7 @@ app.post('/api/order/edit', async (req, res) => {
         metafields: [{
           namespace: "custom",
           key: "customization_overrides",
-          value: JSON.stringify(existingData),
+          value: JSON.stringify(newMetafieldData),
           type: "json"
         }]
       }
@@ -513,13 +510,12 @@ app.post('/api/order/edit', async (req, res) => {
 // Add item to order
 app.post('/api/order/add-item', async (req, res) => {
   try {
-    const { orderId, customerEmail, variantId, quantity, customAttributes } = req.body;
+    const { orderId, customerEmail, variantId, quantity } = req.body;
 
     if (!orderId || !customerEmail || !variantId) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Verify ownership
     const isOwner = await verifyOrderOwnership(orderId, customerEmail);
     if (!isOwner) {
       return res.status(403).json({ error: 'Unauthorized: You do not own this order' });
@@ -528,17 +524,12 @@ app.post('/api/order/add-item', async (req, res) => {
     const gidOrderId = `gid://shopify/Order/${orderId}`;
     const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
 
-    // Step 1: Begin order edit
+    // Begin order edit
     const beginEditQuery = `
       mutation orderEditBegin($id: ID!) {
         orderEditBegin(id: $id) {
-          calculatedOrder {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
+          calculatedOrder { id }
+          userErrors { field message }
         }
       }
     `;
@@ -551,28 +542,12 @@ app.post('/api/order/add-item', async (req, res) => {
 
     const calculatedOrderId = beginResult.data.orderEditBegin.calculatedOrder.id;
 
-    // Step 2: Add variant to order
+    // Add variant
     const addVariantQuery = `
       mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
         orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
-          calculatedOrder {
-            id
-            addedLineItems(first: 5) {
-              edges {
-                node {
-                  id
-                  quantity
-                }
-              }
-            }
-          }
-          calculatedLineItem {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
+          calculatedOrder { id }
+          userErrors { field message }
         }
       }
     `;
@@ -587,25 +562,19 @@ app.post('/api/order/add-item', async (req, res) => {
       throw new Error(addResult.data.orderEditAddVariant.userErrors[0].message);
     }
 
-    // Step 3: Commit the edit
+    // Commit
     const commitQuery = `
       mutation orderEditCommit($id: ID!, $notifyCustomer: Boolean) {
         orderEditCommit(id: $id, notifyCustomer: $notifyCustomer) {
-          order {
-            id
-            name
-          }
-          userErrors {
-            field
-            message
-          }
+          order { id name }
+          userErrors { field message }
         }
       }
     `;
 
     const commitResult = await shopifyAdminAPI(commitQuery, {
       id: calculatedOrderId,
-      notifyCustomer: true // Notify customer when items are added
+      notifyCustomer: true
     });
 
     if (commitResult.data.orderEditCommit.userErrors?.length > 0) {
@@ -623,7 +592,7 @@ app.post('/api/order/add-item', async (req, res) => {
   }
 });
 
-// Search products (for add item functionality)
+// Search products
 app.get('/api/products/search', async (req, res) => {
   try {
     const { q } = req.query;
@@ -640,7 +609,7 @@ app.get('/api/products/search', async (req, res) => {
   }
 });
 
-// Get products from a collection (for customization options)
+// Get products from a collection
 app.get('/api/collection/:handle', async (req, res) => {
   try {
     const { handle } = req.params;
