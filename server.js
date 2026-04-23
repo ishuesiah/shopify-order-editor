@@ -285,6 +285,7 @@ app.post('/api/order/edit', async (req, res) => {
 
     let madeChanges = false;
     const removedLineItemIds = new Set();
+    const addedItems = [];
     const newMetafieldData = { ...existingMetafield };
 
     // Process each parent item edit
@@ -425,8 +426,10 @@ app.post('/api/order/edit', async (req, res) => {
 
         if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
           console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
+          addedItems.push({ title: newValue, variantId: newVariantId, error: addResult.data.orderEditAddVariant.userErrors });
         } else {
           console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
+          addedItems.push({ title: newValue, variantId: newVariantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id });
         }
 
         // Store in metafield with variant ID for future removal
@@ -499,7 +502,12 @@ app.post('/api/order/edit', async (req, res) => {
     res.json({
       success: true,
       message: 'Order customizations updated',
-      order: commitResult.data.orderEditCommit.order
+      order: commitResult.data.orderEditCommit.order,
+      debug: {
+        removedCount: removedLineItemIds.size,
+        addedItems: addedItems,
+        metafieldSaved: newMetafieldData
+      }
     });
   } catch (error) {
     console.error('Error editing order:', error);
