@@ -332,11 +332,18 @@ app.post('/api/order/edit', async (req, res) => {
       const parentLineItemId = edit.lineItemId;
       console.log('\n=== Processing parent:', parentLineItemId, '===');
 
-      // Find parent line item to get its variant ID
+      // Find parent line item to get its variant ID and custom attributes
       const parentItem = allLineItems.find(li => li.node.id.includes(parentLineItemId));
       const parentVariantId = parentItem?.node?.variant?.id;
       const parentVariantIdShort = parentVariantId?.split('/').pop();
+      const parentAttrs = parentItem?.node?.customAttributes || [];
+
+      // Get Duo Pair info from parent (e.g., "Duo 1" or "Duo 2")
+      const duoPairAttr = parentAttrs.find(a => a.key === 'Duo Pair');
+      const duoPairValue = duoPairAttr?.value || 'Duo 1';
+
       console.log('Parent variant ID:', parentVariantId);
+      console.log('Parent Duo Pair:', duoPairValue);
 
       if (!parentVariantId) {
         console.log('Could not find parent variant ID, skipping');
@@ -465,13 +472,20 @@ app.post('/api/order/edit', async (req, res) => {
           continue;
         }
 
-        // Add the accessory
+        // Add the accessory with custom attributes linking it to the parent
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
-        console.log('Adding:', title, gidVariantId);
+        console.log('Adding:', title, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue);
+
+        // Build custom attributes to link accessory to parent book
+        const accessoryAttributes = [
+          { key: '_duo_accessory', value: 'true' },
+          { key: 'Duo Pair', value: duoPairValue },
+          { key: '_duo_parent_variant', value: parentVariantIdShort }
+        ];
 
         const addQuery = `
-          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
-            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
+          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $customAttributes: [AttributeInput!]) {
+            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, customAttributes: $customAttributes) {
               calculatedOrder { id }
               calculatedLineItem { id }
               userErrors { field message }
@@ -482,7 +496,8 @@ app.post('/api/order/edit', async (req, res) => {
         const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
           variantId: gidVariantId,
-          quantity: 1
+          quantity: 1,
+          customAttributes: accessoryAttributes
         });
 
         if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
