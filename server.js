@@ -286,7 +286,8 @@ app.post('/api/order/edit', async (req, res) => {
     let madeChanges = false;
     const removedLineItemIds = new Set();
     const addedItems = [];
-    const newMetafieldData = { ...existingMetafield };
+    // Deep copy the existing metafield data
+    const newMetafieldData = JSON.parse(JSON.stringify(existingMetafield));
 
     // Process each parent item edit
     for (const edit of lineItemEdits) {
