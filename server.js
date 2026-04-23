@@ -520,8 +520,8 @@ app.post('/api/order/edit', async (req, res) => {
 
         // Use orderEditAddCustomItem to add item with custom attributes
         const addQuery = `
-          mutation orderEditAddCustomItem($id: ID!, $title: String!, $quantity: Int!, $price: MoneyInput!, $sku: String, $requiresShipping: Boolean, $taxable: Boolean, $customAttributes: [AttributeInput!]) {
-            orderEditAddCustomItem(id: $id, title: $title, quantity: $quantity, price: $price, sku: $sku, requiresShipping: $requiresShipping, taxable: $taxable, customAttributes: $customAttributes) {
+          mutation orderEditAddCustomItem($id: ID!, $title: String!, $quantity: Int!, $price: MoneyInput!, $requiresShipping: Boolean, $taxable: Boolean, $customAttributes: [AttributeInput!]) {
+            orderEditAddCustomItem(id: $id, title: $title, quantity: $quantity, price: $price, requiresShipping: $requiresShipping, taxable: $taxable, customAttributes: $customAttributes) {
               calculatedOrder { id }
               calculatedLineItem { id }
               userErrors { field message }
@@ -537,7 +537,6 @@ app.post('/api/order/edit', async (req, res) => {
             amount: itemPrice,
             currencyCode: 'CAD'
           },
-          sku: itemSku,
           requiresShipping: true,
           taxable: true,
           customAttributes: accessoryAttributes
