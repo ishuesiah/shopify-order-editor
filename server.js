@@ -582,6 +582,71 @@ app.post('/api/order/edit', async (req, res) => {
       }
     });
 
+    // Build order note with accessory linkage information for ShipStation
+    let customizationNote = '--- CUSTOMIZATION DETAILS (Updated via Order Editor) ---\n';
+
+    for (const edit of lineItemEdits) {
+      const parentLineItemId = edit.lineItemId;
+      const parentItem = allLineItems.find(li => li.node.id.includes(parentLineItemId));
+      const parentTitle = parentItem?.node?.title || 'Unknown Item';
+      const parentAttrs = parentItem?.node?.customAttributes || [];
+      const duoPairAttr = parentAttrs.find(a => a.key === 'Duo Pair');
+      const duoPairValue = duoPairAttr?.value || '';
+
+      const customizations = newMetafieldData[parentLineItemId] || {};
+
+      customizationNote += `\n${parentTitle}${duoPairValue ? ` (${duoPairValue})` : ''}:\n`;
+
+      for (const [customType, customData] of Object.entries(customizations)) {
+        const title = typeof customData === 'object' ? customData.title : customData;
+        if (title && title !== 'None') {
+          const typeLabel = customType.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+          customizationNote += `  - ${typeLabel}: ${title}\n`;
+        }
+      }
+    }
+
+    // Get existing order note and append/update customization section
+    const getOrderNoteQuery = `
+      query getOrderNote($id: ID!) {
+        order(id: $id) {
+          note
+        }
+      }
+    `;
+
+    const orderNoteResult = await shopifyAdminAPI(getOrderNoteQuery, { id: gidOrderId });
+    let existingNote = orderNoteResult.data?.order?.note || '';
+
+    // Remove old customization section if it exists
+    const customizationMarker = '--- CUSTOMIZATION DETAILS';
+    if (existingNote.includes(customizationMarker)) {
+      const markerIndex = existingNote.indexOf(customizationMarker);
+      existingNote = existingNote.substring(0, markerIndex).trim();
+    }
+
+    // Combine existing note with new customization info
+    const newNote = existingNote ? `${existingNote}\n\n${customizationNote}` : customizationNote;
+
+    // Update order note
+    const updateNoteQuery = `
+      mutation orderUpdate($input: OrderInput!) {
+        orderUpdate(input: $input) {
+          order { id note }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    await shopifyAdminAPI(updateNoteQuery, {
+      input: {
+        id: gidOrderId,
+        note: newNote
+      }
+    });
+
+    console.log('Order note updated with customization details');
+
     res.json({
       success: true,
       message: 'Order customizations updated',
@@ -589,7 +654,8 @@ app.post('/api/order/edit', async (req, res) => {
       debug: {
         removedCount: removedLineItemIds.size,
         addedItems: addedItems,
-        metafieldSaved: newMetafieldData
+        metafieldSaved: newMetafieldData,
+        noteUpdated: true
       }
     });
   } catch (error) {
