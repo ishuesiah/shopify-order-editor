@@ -128,7 +128,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get order details
+// Get order details - also syncs active line items metafield
 app.post('/api/order/details', async (req, res) => {
   try {
     const { orderId, customerEmail } = req.body;
@@ -142,6 +142,9 @@ app.post('/api/order/details', async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized: You do not own this order' });
     }
 
+    const gidOrderId = `gid://shopify/Order/${orderId}`;
+
+    // Fetch order with currentQuantity to detect removed items
     const query = `
       query getOrder($id: ID!) {
         order(id: $id) {
@@ -150,12 +153,13 @@ app.post('/api/order/details', async (req, res) => {
           email
           displayFinancialStatus
           displayFulfillmentStatus
-          lineItems(first: 50) {
+          lineItems(first: 100) {
             edges {
               node {
                 id
                 title
                 quantity
+                currentQuantity
                 variant {
                   id
                   title
@@ -171,11 +175,45 @@ app.post('/api/order/details', async (req, res) => {
       }
     `;
 
-    const result = await shopifyAdminAPI(query, {
-      id: `gid://shopify/Order/${orderId}`
+    const result = await shopifyAdminAPI(query, { id: gidOrderId });
+    const order = result.data.order;
+
+    // Build list of active line item IDs (currentQuantity > 0)
+    const activeLineItemIds = [];
+    for (const edge of order.lineItems?.edges || []) {
+      const item = edge.node;
+      if (item.currentQuantity > 0) {
+        // Extract numeric ID from gid://shopify/LineItem/123456
+        const numericId = item.id.split('/').pop();
+        activeLineItemIds.push(numericId);
+      }
+    }
+
+    // Save active line items to metafield so frontend Liquid can access it
+    const metafieldQuery = `
+      mutation orderUpdate($input: OrderInput!) {
+        orderUpdate(input: $input) {
+          order { id }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    await shopifyAdminAPI(metafieldQuery, {
+      input: {
+        id: gidOrderId,
+        metafields: [{
+          namespace: "custom",
+          key: "active_line_items",
+          value: JSON.stringify(activeLineItemIds),
+          type: "json"
+        }]
+      }
     });
 
-    res.json({ success: true, order: result.data.order });
+    console.log('Synced active line items:', activeLineItemIds);
+
+    res.json({ success: true, order, activeLineItemIds });
   } catch (error) {
     console.error('Error getting order:', error);
     res.status(500).json({ error: error.message });
