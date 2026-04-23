@@ -276,6 +276,7 @@ app.post('/api/order/edit', async (req, res) => {
     const calculatedLineItems = calculatedOrder.lineItems?.edges || [];
 
     let madeChanges = false;
+    const removedLineItemIds = new Set(); // Track which items we've already removed
 
     // Process each edit
     for (const edit of lineItemEdits) {
@@ -288,6 +289,20 @@ app.post('/api/order/edit', async (req, res) => {
       // customizations is now an array of {type, title, variantId}
       const customizations = Array.isArray(edit.customizations) ? edit.customizations : [];
 
+      // Find ALL charms linked to this parent (for proper first/second charm handling)
+      const linkedCharms = calculatedLineItems.filter(li => {
+        const attrs = li.node.customAttributes || [];
+        const isLinked = attrs.some(a =>
+          a.key === '_duo_parent_variant' &&
+          parentVariantId &&
+          a.value === parentVariantId.split('/').pop()
+        );
+        const titleLower = li.node.title.toLowerCase();
+        return isLinked && titleLower.includes('charm') && !removedLineItemIds.has(li.node.id);
+      });
+
+      let charmIndex = 0; // Track which charm we're on for this parent
+
       for (const custom of customizations) {
         const customType = custom.type;
         const newValue = custom.title;
@@ -296,28 +311,38 @@ app.post('/api/order/edit', async (req, res) => {
         if (newValue === 'None' || !newValue) continue;
         if (!newVariantId) continue;
 
-        // Find existing accessory line item of this type linked to the parent
-        const existingAccessory = calculatedLineItems.find(li => {
-          const attrs = li.node.customAttributes || [];
-          const isLinked = attrs.some(a =>
-            a.key === '_duo_parent_variant' &&
-            parentVariantId &&
-            a.value === parentVariantId.split('/').pop()
-          );
-          const titleLower = li.node.title.toLowerCase();
+        let existingAccessory = null;
 
-          if (customType.includes('Charm') || customType.includes('charm')) {
-            return isLinked && titleLower.includes('charm');
-          } else if (customType.includes('front') || customType.includes('Front')) {
-            return isLinked && titleLower.includes('pocket') && titleLower.includes('front');
-          } else if (customType.includes('back') || customType.includes('Back')) {
-            return isLinked && titleLower.includes('pocket') && titleLower.includes('back');
+        if (customType.includes('Charm') || customType.includes('charm')) {
+          // Use the next available linked charm for this parent
+          if (charmIndex < linkedCharms.length) {
+            existingAccessory = linkedCharms[charmIndex];
+            charmIndex++;
           }
-          return false;
-        });
+        } else {
+          // For pockets, find by type (front/back)
+          existingAccessory = calculatedLineItems.find(li => {
+            if (removedLineItemIds.has(li.node.id)) return false;
+            const attrs = li.node.customAttributes || [];
+            const isLinked = attrs.some(a =>
+              a.key === '_duo_parent_variant' &&
+              parentVariantId &&
+              a.value === parentVariantId.split('/').pop()
+            );
+            const titleLower = li.node.title.toLowerCase();
+
+            if (customType.includes('front') || customType.includes('Front')) {
+              return isLinked && titleLower.includes('pocket') && titleLower.includes('front');
+            } else if (customType.includes('back') || customType.includes('Back')) {
+              return isLinked && titleLower.includes('pocket') && titleLower.includes('back');
+            }
+            return false;
+          });
+        }
 
         // Remove old accessory if exists
         if (existingAccessory) {
+          removedLineItemIds.add(existingAccessory.node.id);
           const removeQuery = `
             mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
               orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
