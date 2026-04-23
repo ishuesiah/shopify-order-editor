@@ -385,29 +385,51 @@ app.post('/api/order/edit', async (req, res) => {
         madeChanges = true;
       }
 
-      // Step 3: Add new accessories based on selections
+      // Step 3: First update the metafield with new selections
       for (const custom of customizations) {
         const customType = custom.type;
         const newValue = custom.title;
         const newVariantId = custom.variantId;
 
-        console.log('Processing customization:', customType, '=', newValue, 'variantId:', newVariantId);
+        console.log('Updating metafield for:', customType, '=', newValue, 'variantId:', newVariantId);
 
-        // Update metafield entry
         if (newValue === 'None' || !newValue) {
           newMetafieldData[parentLineItemId][customType] = { title: 'None', variantId: null };
+        } else {
+          newMetafieldData[parentLineItemId][customType] = {
+            title: newValue,
+            variantId: newVariantId || null
+          };
+        }
+        madeChanges = true;
+      }
+
+      // Step 4: Add ALL accessories from the final merged metafield state
+      // This ensures Shopify matches what the metafield says
+      const finalCustomizations = newMetafieldData[parentLineItemId] || {};
+      console.log('Final customizations for this parent:', finalCustomizations);
+
+      for (const [customType, customData] of Object.entries(finalCustomizations)) {
+        // Handle both old format (string) and new format ({title, variantId})
+        let title, variantId;
+        if (typeof customData === 'object' && customData !== null) {
+          title = customData.title;
+          variantId = customData.variantId;
+        } else {
+          title = customData;
+          variantId = null;
+        }
+
+        console.log('Adding from final state:', customType, '=', title, 'variantId:', variantId);
+
+        if (!title || title === 'None' || !variantId) {
+          console.log('Skipping - no title or variantId');
           continue;
         }
 
-        if (!newVariantId) {
-          console.log('No variant ID for', newValue, ', skipping add');
-          newMetafieldData[parentLineItemId][customType] = { title: newValue, variantId: null };
-          continue;
-        }
-
-        // Add the new accessory
-        const gidVariantId = `gid://shopify/ProductVariant/${newVariantId}`;
-        console.log('Adding:', newValue, gidVariantId);
+        // Add the accessory
+        const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
+        console.log('Adding:', title, gidVariantId);
 
         const addQuery = `
           mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
@@ -427,19 +449,11 @@ app.post('/api/order/edit', async (req, res) => {
 
         if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
           console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
-          addedItems.push({ title: newValue, variantId: newVariantId, error: addResult.data.orderEditAddVariant.userErrors });
+          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddVariant.userErrors });
         } else {
           console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
-          addedItems.push({ title: newValue, variantId: newVariantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id });
+          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id });
         }
-
-        // Store in metafield with variant ID for future removal
-        newMetafieldData[parentLineItemId][customType] = {
-          title: newValue,
-          variantId: newVariantId
-        };
-
-        madeChanges = true;
       }
     }
 
