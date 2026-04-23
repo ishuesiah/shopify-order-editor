@@ -493,35 +493,15 @@ app.post('/api/order/edit', async (req, res) => {
           continue;
         }
 
-        // Add the accessory with custom attributes linking it to the parent
-        // We use orderEditAddCustomItem to be able to add custom attributes
+        // Add the accessory variant
+        // Note: Shopify's Order Edit API doesn't support custom attributes on line items
+        // The linkage is tracked in the order metafield instead
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
         console.log('Adding:', title, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue);
 
-        // Get variant details (SKU, price, title)
-        const variantDetails = await getVariantDetails(variantId);
-        if (!variantDetails) {
-          console.error('Could not find variant details for:', variantId);
-          continue;
-        }
-
-        const itemTitle = variantDetails.product?.title || title;
-        const itemSku = variantDetails.sku || '';
-        const itemPrice = variantDetails.price || '0.00';
-
-        console.log('Variant details:', { itemTitle, itemSku, itemPrice });
-
-        // Build custom attributes to link accessory to parent book
-        const accessoryAttributes = [
-          { key: '_duo_accessory', value: 'true' },
-          { key: 'Duo Pair', value: duoPairValue },
-          { key: '_duo_parent_variant', value: parentVariantIdShort }
-        ];
-
-        // Use orderEditAddCustomItem to add item with custom attributes
         const addQuery = `
-          mutation orderEditAddCustomItem($id: ID!, $title: String!, $quantity: Int!, $price: MoneyInput!, $requiresShipping: Boolean, $taxable: Boolean, $customAttributes: [AttributeInput!]) {
-            orderEditAddCustomItem(id: $id, title: $title, quantity: $quantity, price: $price, requiresShipping: $requiresShipping, taxable: $taxable, customAttributes: $customAttributes) {
+          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
               calculatedOrder { id }
               calculatedLineItem { id }
               userErrors { field message }
@@ -531,23 +511,16 @@ app.post('/api/order/edit', async (req, res) => {
 
         const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
-          title: itemTitle,
-          quantity: 1,
-          price: {
-            amount: itemPrice,
-            currencyCode: 'CAD'
-          },
-          requiresShipping: true,
-          taxable: true,
-          customAttributes: accessoryAttributes
+          variantId: gidVariantId,
+          quantity: 1
         });
 
-        if (addResult.data?.orderEditAddCustomItem?.userErrors?.length > 0) {
-          console.error('Add error:', addResult.data.orderEditAddCustomItem.userErrors);
-          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddCustomItem.userErrors });
+        if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
+          console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
+          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddVariant.userErrors });
         } else {
-          console.log('Added successfully with properties, line item:', addResult.data?.orderEditAddCustomItem?.calculatedLineItem?.id);
-          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddCustomItem?.calculatedLineItem?.id });
+          console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
+          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
         }
       }
     }
