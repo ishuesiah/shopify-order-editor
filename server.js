@@ -401,12 +401,36 @@ app.post('/api/order/edit', async (req, res) => {
     }
 
     // Save customization changes to order metafield for display purposes
-    const customizationData = {};
+    // First, fetch existing metafield data to merge with new changes
+    const getMetafieldQuery = `
+      query getOrderMetafield($id: ID!) {
+        order(id: $id) {
+          metafield(namespace: "custom", key: "customization_overrides") {
+            value
+          }
+        }
+      }
+    `;
+
+    let existingData = {};
+    try {
+      const metafieldResult = await shopifyAdminAPI(getMetafieldQuery, { id: gidOrderId });
+      const existingValue = metafieldResult.data?.order?.metafield?.value;
+      if (existingValue) {
+        existingData = JSON.parse(existingValue);
+      }
+    } catch (e) {
+      console.log('No existing metafield or parse error, starting fresh');
+    }
+
+    // Merge new changes into existing data
     for (const edit of lineItemEdits) {
       const lineItemId = edit.lineItemId;
-      customizationData[lineItemId] = {};
+      if (!existingData[lineItemId]) {
+        existingData[lineItemId] = {};
+      }
       for (const custom of (Array.isArray(edit.customizations) ? edit.customizations : [])) {
-        customizationData[lineItemId][custom.type] = custom.title;
+        existingData[lineItemId][custom.type] = custom.title;
       }
     }
 
@@ -430,7 +454,7 @@ app.post('/api/order/edit', async (req, res) => {
         metafields: [{
           namespace: "custom",
           key: "customization_overrides",
-          value: JSON.stringify(customizationData),
+          value: JSON.stringify(existingData),
           type: "json"
         }]
       }
