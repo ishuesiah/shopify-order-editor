@@ -400,6 +400,42 @@ app.post('/api/order/edit', async (req, res) => {
       throw new Error(commitResult.data.orderEditCommit.userErrors[0].message);
     }
 
+    // Save customization changes to order metafield for display purposes
+    const customizationData = {};
+    for (const edit of lineItemEdits) {
+      const lineItemId = edit.lineItemId;
+      customizationData[lineItemId] = {};
+      for (const custom of (Array.isArray(edit.customizations) ? edit.customizations : [])) {
+        customizationData[lineItemId][custom.type] = custom.title;
+      }
+    }
+
+    const metafieldQuery = `
+      mutation orderUpdate($input: OrderInput!) {
+        orderUpdate(input: $input) {
+          order {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    await shopifyAdminAPI(metafieldQuery, {
+      input: {
+        id: gidOrderId,
+        metafields: [{
+          namespace: "custom",
+          key: "customization_overrides",
+          value: JSON.stringify(customizationData),
+          type: "json"
+        }]
+      }
+    });
+
     res.json({
       success: true,
       message: 'Order customizations updated',
