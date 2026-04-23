@@ -279,15 +279,20 @@ app.post('/api/order/edit', async (req, res) => {
     const removedLineItemIds = new Set(); // Track which items we've already removed
 
     // Process each edit
+    console.log('Processing lineItemEdits:', JSON.stringify(lineItemEdits, null, 2));
+
     for (const edit of lineItemEdits) {
       const parentLineItemId = edit.lineItemId;
+      console.log('Processing edit for lineItemId:', parentLineItemId);
 
       // Find parent line item to get its variant ID for linking
       const parentItem = lineItems.find(li => li.node.id.includes(parentLineItemId));
       const parentVariantId = parentItem?.node?.variant?.id;
+      console.log('Parent variant ID:', parentVariantId);
 
       // customizations is now an array of {type, title, variantId}
       const customizations = Array.isArray(edit.customizations) ? edit.customizations : [];
+      console.log('Customizations to process:', customizations.length, customizations);
 
       // Find ALL charms linked to this parent (for proper first/second charm handling)
       const linkedCharms = calculatedLineItems.filter(li => {
@@ -366,6 +371,7 @@ app.post('/api/order/edit', async (req, res) => {
         }
 
         // Add new accessory
+        console.log('Adding accessory:', customType, newValue, 'variantId:', newVariantId);
         const addQuery = `
           mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
             orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
@@ -383,11 +389,15 @@ app.post('/api/order/edit', async (req, res) => {
           }
         `;
 
-        await shopifyAdminAPI(addQuery, {
+        const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
           variantId: newVariantId,
           quantity: 1
         });
+        console.log('Add result:', JSON.stringify(addResult, null, 2));
+        if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
+          console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
+        }
         madeChanges = true;
       }
     }
@@ -449,15 +459,19 @@ app.post('/api/order/edit', async (req, res) => {
     }
 
     // Merge new changes into existing data
+    console.log('Existing metafield data:', existingData);
     for (const edit of lineItemEdits) {
       const lineItemId = edit.lineItemId;
+      console.log('Merging for lineItemId:', lineItemId);
       if (!existingData[lineItemId]) {
         existingData[lineItemId] = {};
       }
       for (const custom of (Array.isArray(edit.customizations) ? edit.customizations : [])) {
+        console.log('Setting', custom.type, '=', custom.title);
         existingData[lineItemId][custom.type] = custom.title;
       }
     }
+    console.log('Final metafield data to save:', JSON.stringify(existingData, null, 2));
 
     const metafieldQuery = `
       mutation orderUpdate($input: OrderInput!) {
