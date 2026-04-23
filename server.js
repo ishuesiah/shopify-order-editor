@@ -18,7 +18,7 @@ app.use(cors({
 // Shopify API configuration
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const API_VERSION = '2024-01';
+const API_VERSION = '2024-10';
 
 // Helper function to make Shopify Admin API requests
 async function shopifyAdminAPI(query, variables = {}) {
@@ -68,6 +68,27 @@ async function verifyOrderOwnership(orderId, customerEmail) {
 
   const orderEmail = order.customer?.email || order.email;
   return orderEmail?.toLowerCase() === customerEmail?.toLowerCase();
+}
+
+// Get variant details by ID (for adding custom items with properties)
+async function getVariantDetails(variantId) {
+  const query = `
+    query getVariant($id: ID!) {
+      productVariant(id: $id) {
+        id
+        title
+        sku
+        price
+        product {
+          title
+        }
+      }
+    }
+  `;
+
+  const gidVariantId = variantId.startsWith('gid://') ? variantId : `gid://shopify/ProductVariant/${variantId}`;
+  const result = await shopifyAdminAPI(query, { id: gidVariantId });
+  return result.data?.productVariant;
 }
 
 // Search for product by title
@@ -473,8 +494,22 @@ app.post('/api/order/edit', async (req, res) => {
         }
 
         // Add the accessory with custom attributes linking it to the parent
+        // We use orderEditAddCustomItem to be able to add custom attributes
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
         console.log('Adding:', title, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue);
+
+        // Get variant details (SKU, price, title)
+        const variantDetails = await getVariantDetails(variantId);
+        if (!variantDetails) {
+          console.error('Could not find variant details for:', variantId);
+          continue;
+        }
+
+        const itemTitle = variantDetails.product?.title || title;
+        const itemSku = variantDetails.sku || '';
+        const itemPrice = variantDetails.price || '0.00';
+
+        console.log('Variant details:', { itemTitle, itemSku, itemPrice });
 
         // Build custom attributes to link accessory to parent book
         const accessoryAttributes = [
@@ -483,9 +518,10 @@ app.post('/api/order/edit', async (req, res) => {
           { key: '_duo_parent_variant', value: parentVariantIdShort }
         ];
 
+        // Use orderEditAddCustomItem to add item with custom attributes
         const addQuery = `
-          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!, $customAttributes: [AttributeInput!]) {
-            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity, customAttributes: $customAttributes) {
+          mutation orderEditAddCustomItem($id: ID!, $title: String!, $quantity: Int!, $price: MoneyInput!, $sku: String, $requiresShipping: Boolean, $taxable: Boolean, $customAttributes: [AttributeInput!]) {
+            orderEditAddCustomItem(id: $id, title: $title, quantity: $quantity, price: $price, sku: $sku, requiresShipping: $requiresShipping, taxable: $taxable, customAttributes: $customAttributes) {
               calculatedOrder { id }
               calculatedLineItem { id }
               userErrors { field message }
@@ -495,17 +531,24 @@ app.post('/api/order/edit', async (req, res) => {
 
         const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
-          variantId: gidVariantId,
+          title: itemTitle,
           quantity: 1,
+          price: {
+            amount: itemPrice,
+            currencyCode: 'CAD'
+          },
+          sku: itemSku,
+          requiresShipping: true,
+          taxable: true,
           customAttributes: accessoryAttributes
         });
 
-        if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
-          console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
-          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddVariant.userErrors });
+        if (addResult.data?.orderEditAddCustomItem?.userErrors?.length > 0) {
+          console.error('Add error:', addResult.data.orderEditAddCustomItem.userErrors);
+          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddCustomItem.userErrors });
         } else {
-          console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
-          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id });
+          console.log('Added successfully with properties, line item:', addResult.data?.orderEditAddCustomItem?.calculatedLineItem?.id);
+          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddCustomItem?.calculatedLineItem?.id });
         }
       }
     }
