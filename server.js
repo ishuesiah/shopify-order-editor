@@ -475,6 +475,11 @@ app.post('/api/order/edit', async (req, res) => {
       const finalCustomizations = newMetafieldData[parentLineItemId] || {};
       console.log('Final customizations for this parent:', finalCustomizations);
 
+      // Aggregate quantities by variantId to handle duplicate charms
+      // e.g., if both firstRibbonCharm and secondRibbonCharm are "Floriculture Charm",
+      // we need to add quantity: 2, not two separate quantity: 1 calls
+      const variantQuantities = {};
+
       for (const [customType, customData] of Object.entries(finalCustomizations)) {
         // Handle both old format (string) and new format ({title, variantId})
         let title, variantId;
@@ -486,18 +491,27 @@ app.post('/api/order/edit', async (req, res) => {
           variantId = null;
         }
 
-        console.log('Adding from final state:', customType, '=', title, 'variantId:', variantId);
+        console.log('Processing from final state:', customType, '=', title, 'variantId:', variantId);
 
         if (!title || title === 'None' || !variantId) {
           console.log('Skipping - no title or variantId');
           continue;
         }
 
-        // Add the accessory variant
-        // Note: Shopify's Order Edit API doesn't support custom attributes on line items
-        // The linkage is tracked in the order metafield instead
+        // Aggregate by variantId
+        if (!variantQuantities[variantId]) {
+          variantQuantities[variantId] = { title, quantity: 0, types: [] };
+        }
+        variantQuantities[variantId].quantity += 1;
+        variantQuantities[variantId].types.push(customType);
+      }
+
+      console.log('Aggregated variant quantities:', variantQuantities);
+
+      // Now add each unique variant with the correct quantity
+      for (const [variantId, data] of Object.entries(variantQuantities)) {
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
-        console.log('Adding:', title, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue);
+        console.log('Adding:', data.title, 'x', data.quantity, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue, 'types:', data.types);
 
         const addQuery = `
           mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
@@ -512,15 +526,15 @@ app.post('/api/order/edit', async (req, res) => {
         const addResult = await shopifyAdminAPI(addQuery, {
           id: calculatedOrderId,
           variantId: gidVariantId,
-          quantity: 1
+          quantity: data.quantity
         });
 
         if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
           console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
-          addedItems.push({ type: customType, title, variantId, error: addResult.data.orderEditAddVariant.userErrors });
+          addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, error: addResult.data.orderEditAddVariant.userErrors });
         } else {
           console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
-          addedItems.push({ type: customType, title, variantId, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
+          addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
         }
       }
     }
