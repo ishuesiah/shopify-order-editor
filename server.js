@@ -717,6 +717,44 @@ app.post('/api/order/edit', async (req, res) => {
 
     console.log('Gift Note updated with customization details');
 
+    // Also clear old customization section from order note (from before we switched to Gift Note)
+    const getOrderNoteQuery = `
+      query getOrderNote($id: ID!) {
+        order(id: $id) {
+          note
+        }
+      }
+    `;
+
+    const orderNoteResult = await shopifyAdminAPI(getOrderNoteQuery, { id: gidOrderId });
+    let existingNote = orderNoteResult.data?.order?.note || '';
+
+    // Remove old customization section from order note if it exists
+    const customizationMarker = '--- CUSTOMIZATION DETAILS';
+    if (existingNote.includes(customizationMarker)) {
+      const markerIndex = existingNote.indexOf(customizationMarker);
+      existingNote = existingNote.substring(0, markerIndex).trim();
+
+      // Update order note with cleaned version
+      const updateNoteQuery = `
+        mutation orderUpdate($input: OrderInput!) {
+          orderUpdate(input: $input) {
+            order { id }
+            userErrors { field message }
+          }
+        }
+      `;
+
+      await shopifyAdminAPI(updateNoteQuery, {
+        input: {
+          id: gidOrderId,
+          note: existingNote
+        }
+      });
+
+      console.log('Cleared old customization section from order note');
+    }
+
     res.json({
       success: true,
       message: 'Order customizations updated',
