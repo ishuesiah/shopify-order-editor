@@ -596,9 +596,35 @@ app.post('/api/order/edit', async (req, res) => {
       }
     });
 
-    // Build order note with accessory linkage information for ShipStation
-    // Include ALL books' customizations from the metafield, not just the ones edited this session
-    let customizationNote = '--- CUSTOMIZATION DETAILS (Updated via Order Editor) ---\n';
+    // Update Gift Note custom attribute (for ShipStation) instead of order note
+    // Keep the "Charm(s) handplaced by:" line from existing Gift Note
+    const getOrderAttributesQuery = `
+      query getOrderAttributes($id: ID!) {
+        order(id: $id) {
+          customAttributes {
+            key
+            value
+          }
+        }
+      }
+    `;
+
+    const orderAttributesResult = await shopifyAdminAPI(getOrderAttributesQuery, { id: gidOrderId });
+    const existingAttributes = orderAttributesResult.data?.order?.customAttributes || [];
+
+    // Find existing Gift Note and extract "Charm(s) handplaced by:" line
+    const giftNoteAttr = existingAttributes.find(attr => attr.key === 'Gift Note');
+    let handplacedByLine = '';
+    if (giftNoteAttr?.value) {
+      // Look for the handplaced by line (with or without underscores/dashes before it)
+      const handplacedMatch = giftNoteAttr.value.match(/[_\-]*\s*Charm\(s\) handplaced by:.*$/im);
+      if (handplacedMatch) {
+        handplacedByLine = '\n\n________________________________________\nCharm(s) handplaced by: _________________________';
+      }
+    }
+
+    // Build new Gift Note with customizations
+    let newGiftNote = '--- CUSTOMIZATION DETAILS (Updated via Order Editor) ---\n';
 
     for (const [parentLineItemId, customizations] of Object.entries(newMetafieldData)) {
       const parentItem = allLineItems.find(li => li.node.id.includes(parentLineItemId));
@@ -607,65 +633,52 @@ app.post('/api/order/edit', async (req, res) => {
       const duoPairAttr = parentAttrs.find(a => a.key === 'Duo Pair');
       const duoPairValue = duoPairAttr?.value || '';
 
-      // Check if this item has any customizations to show
       const hasCustomizations = Object.entries(customizations).some(([_, customData]) => {
         const title = typeof customData === 'object' ? customData.title : customData;
         return title && title !== 'None';
       });
 
       if (hasCustomizations) {
-        customizationNote += `\n${parentTitle}${duoPairValue ? ` (${duoPairValue})` : ''}:\n`;
+        newGiftNote += `\n${parentTitle}${duoPairValue ? ` (${duoPairValue})` : ''}:\n`;
 
         for (const [customType, customData] of Object.entries(customizations)) {
           const title = typeof customData === 'object' ? customData.title : customData;
           if (title && title !== 'None') {
             const typeLabel = customType.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
-            customizationNote += `  - ${typeLabel}: ${title}\n`;
+            newGiftNote += `  - ${typeLabel}: ${title}\n`;
           }
         }
       }
     }
 
-    // Get existing order note and append/update customization section
-    const getOrderNoteQuery = `
-      query getOrderNote($id: ID!) {
-        order(id: $id) {
-          note
-        }
-      }
-    `;
+    // Add the handplaced by line at the end
+    newGiftNote += handplacedByLine;
 
-    const orderNoteResult = await shopifyAdminAPI(getOrderNoteQuery, { id: gidOrderId });
-    let existingNote = orderNoteResult.data?.order?.note || '';
+    // Build updated custom attributes array
+    const updatedAttributes = existingAttributes
+      .filter(attr => attr.key !== 'Gift Note')
+      .map(attr => ({ key: attr.key, value: attr.value }));
 
-    // Remove old customization section if it exists
-    const customizationMarker = '--- CUSTOMIZATION DETAILS';
-    if (existingNote.includes(customizationMarker)) {
-      const markerIndex = existingNote.indexOf(customizationMarker);
-      existingNote = existingNote.substring(0, markerIndex).trim();
-    }
+    updatedAttributes.push({ key: 'Gift Note', value: newGiftNote });
 
-    // Combine existing note with new customization info
-    const newNote = existingNote ? `${existingNote}\n\n${customizationNote}` : customizationNote;
-
-    // Update order note
-    const updateNoteQuery = `
+    // Update order custom attributes
+    const updateAttributesQuery = `
       mutation orderUpdate($input: OrderInput!) {
         orderUpdate(input: $input) {
-          order { id note }
+          order { id }
           userErrors { field message }
         }
       }
     `;
 
-    await shopifyAdminAPI(updateNoteQuery, {
+    await shopifyAdminAPI(updateAttributesQuery, {
       input: {
         id: gidOrderId,
-        note: newNote
+        customAttributes: updatedAttributes
       }
     });
 
-    console.log('Order note updated with customization details');
+    console.log('Gift Note updated with customization details');
 
     res.json({
       success: true,
@@ -675,7 +688,7 @@ app.post('/api/order/edit', async (req, res) => {
         removedCount: removedLineItemIds.size,
         addedItems: addedItems,
         metafieldSaved: newMetafieldData,
-        noteUpdated: true
+        giftNoteUpdated: true
       }
     });
   } catch (error) {
