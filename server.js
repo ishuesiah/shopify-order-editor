@@ -597,25 +597,31 @@ app.post('/api/order/edit', async (req, res) => {
     });
 
     // Build order note with accessory linkage information for ShipStation
+    // Include ALL books' customizations from the metafield, not just the ones edited this session
     let customizationNote = '--- CUSTOMIZATION DETAILS (Updated via Order Editor) ---\n';
 
-    for (const edit of lineItemEdits) {
-      const parentLineItemId = edit.lineItemId;
+    for (const [parentLineItemId, customizations] of Object.entries(newMetafieldData)) {
       const parentItem = allLineItems.find(li => li.node.id.includes(parentLineItemId));
       const parentTitle = parentItem?.node?.title || 'Unknown Item';
       const parentAttrs = parentItem?.node?.customAttributes || [];
       const duoPairAttr = parentAttrs.find(a => a.key === 'Duo Pair');
       const duoPairValue = duoPairAttr?.value || '';
 
-      const customizations = newMetafieldData[parentLineItemId] || {};
-
-      customizationNote += `\n${parentTitle}${duoPairValue ? ` (${duoPairValue})` : ''}:\n`;
-
-      for (const [customType, customData] of Object.entries(customizations)) {
+      // Check if this item has any customizations to show
+      const hasCustomizations = Object.entries(customizations).some(([_, customData]) => {
         const title = typeof customData === 'object' ? customData.title : customData;
-        if (title && title !== 'None') {
-          const typeLabel = customType.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
-          customizationNote += `  - ${typeLabel}: ${title}\n`;
+        return title && title !== 'None';
+      });
+
+      if (hasCustomizations) {
+        customizationNote += `\n${parentTitle}${duoPairValue ? ` (${duoPairValue})` : ''}:\n`;
+
+        for (const [customType, customData] of Object.entries(customizations)) {
+          const title = typeof customData === 'object' ? customData.title : customData;
+          if (title && title !== 'None') {
+            const typeLabel = customType.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+            customizationNote += `  - ${typeLabel}: ${title}\n`;
+          }
         }
       }
     }
