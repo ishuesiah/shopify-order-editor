@@ -509,15 +509,18 @@ app.post('/api/order/edit', async (req, res) => {
       console.log('Aggregated variant quantities:', variantQuantities);
 
       // Now add each unique variant with the correct quantity
-      // Check if variant already exists on order (even with qty 0) - if so, use setQuantity instead of addVariant
+      // Check if variant already exists on order WITH qty > 0 - if so, use setQuantity instead of addVariant
+      // Items with qty: 0 are considered "removed" by Shopify and can't be edited
       for (const [variantId, data] of Object.entries(variantQuantities)) {
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
 
-        // Check if this variant already exists on the order (any line item with this variant)
-        const existingLineItem = calculatedLineItems.find(li => li.node.variant?.id === gidVariantId);
+        // Check if this variant already exists on the order with qty > 0 (not removed)
+        const existingLineItem = calculatedLineItems.find(li =>
+          li.node.variant?.id === gidVariantId && li.node.quantity > 0
+        );
 
         if (existingLineItem) {
-          // Variant already exists - use setQuantity to update it
+          // Variant already exists with qty > 0 - use setQuantity to update it
           console.log('Setting quantity for existing item:', data.title, 'x', data.quantity, existingLineItem.node.id);
 
           const setQtyQuery = `
