@@ -509,32 +509,66 @@ app.post('/api/order/edit', async (req, res) => {
       console.log('Aggregated variant quantities:', variantQuantities);
 
       // Now add each unique variant with the correct quantity
+      // Check if variant already exists on order (even with qty 0) - if so, use setQuantity instead of addVariant
       for (const [variantId, data] of Object.entries(variantQuantities)) {
         const gidVariantId = `gid://shopify/ProductVariant/${variantId}`;
-        console.log('Adding:', data.title, 'x', data.quantity, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue, 'types:', data.types);
 
-        const addQuery = `
-          mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
-            orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
-              calculatedOrder { id }
-              calculatedLineItem { id }
-              userErrors { field message }
+        // Check if this variant already exists on the order (any line item with this variant)
+        const existingLineItem = calculatedLineItems.find(li => li.node.variant?.id === gidVariantId);
+
+        if (existingLineItem) {
+          // Variant already exists - use setQuantity to update it
+          console.log('Setting quantity for existing item:', data.title, 'x', data.quantity, existingLineItem.node.id);
+
+          const setQtyQuery = `
+            mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+              orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+                calculatedOrder { id }
+                userErrors { field message }
+              }
             }
+          `;
+
+          const setQtyResult = await shopifyAdminAPI(setQtyQuery, {
+            id: calculatedOrderId,
+            lineItemId: existingLineItem.node.id,
+            quantity: data.quantity
+          });
+
+          if (setQtyResult.data?.orderEditSetQuantity?.userErrors?.length > 0) {
+            console.error('Set quantity error:', setQtyResult.data.orderEditSetQuantity.userErrors);
+            addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, error: setQtyResult.data.orderEditSetQuantity.userErrors });
+          } else {
+            console.log('Set quantity successfully for:', data.title);
+            addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, lineItemId: existingLineItem.node.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
           }
-        `;
-
-        const addResult = await shopifyAdminAPI(addQuery, {
-          id: calculatedOrderId,
-          variantId: gidVariantId,
-          quantity: data.quantity
-        });
-
-        if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
-          console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
-          addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, error: addResult.data.orderEditAddVariant.userErrors });
         } else {
-          console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
-          addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
+          // Variant doesn't exist - add it
+          console.log('Adding new item:', data.title, 'x', data.quantity, gidVariantId, 'linked to parent:', parentVariantIdShort, 'Duo Pair:', duoPairValue, 'types:', data.types);
+
+          const addQuery = `
+            mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) {
+              orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) {
+                calculatedOrder { id }
+                calculatedLineItem { id }
+                userErrors { field message }
+              }
+            }
+          `;
+
+          const addResult = await shopifyAdminAPI(addQuery, {
+            id: calculatedOrderId,
+            variantId: gidVariantId,
+            quantity: data.quantity
+          });
+
+          if (addResult.data?.orderEditAddVariant?.userErrors?.length > 0) {
+            console.error('Add error:', addResult.data.orderEditAddVariant.userErrors);
+            addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, error: addResult.data.orderEditAddVariant.userErrors });
+          } else {
+            console.log('Added successfully, line item:', addResult.data?.orderEditAddVariant?.calculatedLineItem?.id);
+            addedItems.push({ types: data.types, title: data.title, variantId, quantity: data.quantity, lineItemId: addResult.data?.orderEditAddVariant?.calculatedLineItem?.id, parentVariantId: parentVariantIdShort, duoPair: duoPairValue });
+          }
         }
       }
     }
